@@ -37,6 +37,7 @@
 
 #define SECOND_IN_NSECS 1000000000
 #define SEC SECOND_IN_NSECS
+#define RUN_LOOP_TIMEOUT_US 50000
 
 #define DELAY_AAC  0.20 //empirical, matches audio latency of about -0.25 sec after first clock sync event
 
@@ -436,9 +437,9 @@ raop_rtp_thread_udp(void *arg)
             break;
         }
 
-        /* Set timeout value to 5ms */
+        /* Socket readiness returns immediately; this timeout bounds control checks. */
         tv.tv_sec = 0;
-        tv.tv_usec = 5000;
+        tv.tv_usec = RUN_LOOP_TIMEOUT_US;
 
         /* Get the correct nfds value */
         int nfds = raop_rtp->csock+1;

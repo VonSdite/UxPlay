@@ -53,6 +53,7 @@
 
 #define SECOND_IN_NSECS 1000000000UL
 #define SEC SECOND_IN_NSECS
+#define RUN_LOOP_TIMEOUT_US 50000
 
 /* for MacOS, where SOL_TCP and TCP_KEEPIDLE are not defined */
 #if !defined(SOL_TCP) && defined(IPPROTO_TCP)
@@ -271,9 +272,9 @@ raop_rtp_mirror_thread(void *arg)
         }
         MUTEX_UNLOCK(raop_rtp_mirror->run_mutex);
 
-        /* Set timeout valu to 5ms */
+        /* Socket readiness returns immediately; this timeout bounds control checks. */
         tv.tv_sec = 0;
-        tv.tv_usec = 5000;
+        tv.tv_usec = RUN_LOOP_TIMEOUT_US;
 
         /* Get the correct nfds value and set rfds */
         FD_ZERO(&rfds);
@@ -314,7 +315,7 @@ raop_rtp_mirror_thread(void *arg)
             // We're calling recv for a certain amount of data, so we need a timeout
             struct timeval tv;
             tv.tv_sec = 0;
-            tv.tv_usec = 5000;
+            tv.tv_usec = RUN_LOOP_TIMEOUT_US;
             if (setsockopt(stream_fd, SOL_SOCKET, SO_RCVTIMEO, CAST &tv, sizeof(tv)) < 0) {
                 int sock_err = SOCKET_GET_ERROR();
                 logger_log(raop_rtp_mirror->logger, LOGGER_ERR,
