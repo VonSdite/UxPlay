@@ -39,7 +39,6 @@
 
 struct aes_ctx_s {
     EVP_CIPHER_CTX *cipher_ctx;
-    uint8_t key[AES_128_BLOCK_SIZE];
     uint8_t iv[AES_128_BLOCK_SIZE];
     aes_direction_t direction;
     uint8_t block_offset;
@@ -75,7 +74,6 @@ aes_ctx_t *aes_init(const uint8_t *key, const uint8_t *iv, const EVP_CIPHER *typ
         }
     }
 
-    memcpy(ctx->key, key, AES_128_BLOCK_SIZE);
     memcpy(ctx->iv, iv, AES_128_BLOCK_SIZE);
     EVP_CIPHER_CTX_set_padding(ctx->cipher_ctx, 0);
     return ctx;
@@ -112,28 +110,17 @@ void aes_destroy(aes_ctx_t *ctx) {
     }
 }
 
-void aes_reset(aes_ctx_t *ctx, const EVP_CIPHER *type, aes_direction_t direction) {
-    uint8_t key[AES_128_BLOCK_SIZE], iv[AES_128_BLOCK_SIZE]; 
-    memcpy(key, ctx->key, AES_128_BLOCK_SIZE);
-    memcpy(iv, ctx->iv, AES_128_BLOCK_SIZE);
-
-    if (!EVP_CIPHER_CTX_reset(ctx->cipher_ctx)) {
-        handle_error(__func__);
-    }
-
-    if (direction == AES_ENCRYPT) {
-        if (!EVP_EncryptInit_ex(ctx->cipher_ctx, type, NULL, key, iv)) {
+static void aes_reset_iv(aes_ctx_t *ctx) {
+    if (ctx->direction == AES_ENCRYPT) {
+        if (!EVP_EncryptInit_ex(ctx->cipher_ctx, NULL, NULL, NULL, ctx->iv)) {
             handle_error(__func__);
         }
     } else {
-        if (!EVP_DecryptInit_ex(ctx->cipher_ctx, type, NULL, key, iv)) {
+        if (!EVP_DecryptInit_ex(ctx->cipher_ctx, NULL, NULL, NULL, ctx->iv)) {
             handle_error(__func__);
         }
     }
-
-    memcpy(ctx->key, key, AES_128_BLOCK_SIZE);
-    memcpy(ctx->iv, iv, AES_128_BLOCK_SIZE);
-    EVP_CIPHER_CTX_set_padding(ctx->cipher_ctx, 0);
+    ctx->block_offset = 0;
 }
 
 // AES CTR
@@ -158,7 +145,7 @@ void aes_ctr_decrypt(aes_ctx_t *ctx, const uint8_t *in, uint8_t *out, int len) {
 }
 
 void aes_ctr_reset(aes_ctx_t *ctx) {
-    aes_reset(ctx, EVP_aes_128_ctr(), AES_ENCRYPT);
+    aes_reset_iv(ctx);
 }
 
 void aes_ctr_destroy(aes_ctx_t *ctx) {
@@ -182,7 +169,7 @@ void aes_cbc_decrypt(aes_ctx_t *ctx, const uint8_t *in, uint8_t *out, int len) {
 }
 
 void aes_cbc_reset(aes_ctx_t *ctx) {
-    aes_reset(ctx, EVP_aes_128_cbc(), ctx->direction);
+    aes_reset_iv(ctx);
 }
 
 void aes_cbc_destroy(aes_ctx_t *ctx) {
