@@ -132,7 +132,6 @@ raop_buffer_decrypt(raop_buffer_t *raop_buffer, unsigned char *data, unsigned ch
         }
     }
     int encryptedlen = payload_size / 16*16;
-    memset(output, 0, payload_size);
 
     aes_cbc_decrypt(raop_buffer->aes_ctx, &data[12], output, encryptedlen);
     aes_cbc_reset(raop_buffer->aes_ctx);

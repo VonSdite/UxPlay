@@ -380,12 +380,16 @@ raop_rtp_mirror_thread(void *arg)
             /*packet[0:3] contains the payload size */
             int payload_size = byteutils_get_int(packet, 0);
             char packet_description[13] = {0};
-            char *p = packet_description;
-            int n = sizeof(packet_description);
-            for (int i = 4; i < 8; i++) {
-                snprintf(p, n, "%2.2x ", (unsigned int) packet[i]);
-                n -= 3;
-                p += 3;
+            const bool known_packet_type = packet[4] == 0x00 || packet[4] == 0x01 ||
+                packet[4] == 0x02 || packet[4] == 0x05;
+            if (logger_debug || logger_debug_data || !known_packet_type) {
+                char *p = packet_description;
+                int n = sizeof(packet_description);
+                for (int i = 4; i < 8; i++) {
+                    snprintf(p, n, "%2.2x ", (unsigned int) packet[i]);
+                    n -= 3;
+                    p += 3;
+                }
             }
             ntp_timestamp_raw = byteutils_get_long(packet, 8);
             ntp_timestamp_remote = raop_ntp_timestamp_to_nano_seconds(ntp_timestamp_raw, false);
@@ -899,7 +903,6 @@ raop_rtp_mirror_thread(void *arg)
             }
 
             payload = NULL;
-            memset(packet, 0, 128);
             readstart = 0;
             if (unsupported_codec || buffer_allocation_failed) {
                 break;
