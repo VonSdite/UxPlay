@@ -134,6 +134,45 @@ raop_rtp_mirror_parse_remote(raop_rtp_mirror_t *raop_rtp_mirror, const char *rem
     return 0;
 }
 
+static uint64_t
+plist_get_uint_or_zero(plist_t root_node, const char *key)
+{
+    uint64_t value = 0;
+    plist_t node = plist_dict_get_item(root_node, key);
+    if (node) plist_get_uint_val(node, &value);
+    return value;
+}
+
+static double
+plist_get_real_or_zero(plist_t root_node, const char *key)
+{
+    double value = 0.0;
+    plist_t node = plist_dict_get_item(root_node, key);
+    if (node) plist_get_real_val(node, &value);
+    return value;
+}
+
+static void
+raop_rtp_mirror_report_client_stats(raop_rtp_mirror_t *raop_rtp_mirror, plist_t root_node)
+{
+    if (!raop_rtp_mirror->callbacks.mirror_video_report || !root_node) return;
+    raop_video_stats_t stats = {0};
+    stats.rtt_ms = plist_get_uint_or_zero(root_node, "rttAvg");
+    stats.sent_fps = plist_get_uint_or_zero(root_node, "sentFramesAvg");
+    stats.queued_frames = plist_get_uint_or_zero(root_node, "queuedFramesAvg");
+    stats.before_encoder_fps = plist_get_uint_or_zero(root_node, "beforeEncoderFPS");
+    stats.submit_surface_fps = plist_get_uint_or_zero(root_node, "submitSurfaceFPS");
+    stats.encoder_fps = plist_get_uint_or_zero(root_node, "encoderCurrentFPS");
+    stats.encoder_drop_fps = plist_get_uint_or_zero(root_node, "encoderDropFPS");
+    stats.encoder_queue_drop_fps = plist_get_uint_or_zero(root_node, "encoderQueueDropFPS");
+    stats.sink_overflow_drop_fps = plist_get_uint_or_zero(root_node, "sinkOverflowDropFPS");
+    stats.idle_drop_fps = plist_get_uint_or_zero(root_node, "idleDropFPS");
+    stats.loss = plist_get_real_or_zero(root_node, "lossAvg");
+    stats.tx_mbps = plist_get_real_or_zero(root_node, "txUsageAvg") / 1000000.0;
+    stats.capacity_mbps = plist_get_real_or_zero(root_node, "txCapacityAvg") / 1000000.0;
+    raop_rtp_mirror->callbacks.mirror_video_report(raop_rtp_mirror->callbacks.cls, &stats);
+}
+
 #define NO_FLUSH (-42)
 raop_rtp_mirror_t *raop_rtp_mirror_init(logger_t *logger, raop_callbacks_t *callbacks, raop_ntp_t *ntp,
                                         const char *remote, int remotelen, const unsigned char *aeskey)
@@ -809,10 +848,16 @@ raop_rtp_mirror_thread(void *arg)
                         uint32_t plist_len = 0;
                         plist_t root_node = NULL;
                         plist_from_bin((char *) payload, plist_size, &root_node);
+                        raop_rtp_mirror_report_client_stats(raop_rtp_mirror, root_node);
                         if (raop_rtp_mirror->show_client_FPS_data) {
                             plist_to_xml(root_node, &plist_xml, &plist_len);
-                            logger_log(raop_rtp_mirror->logger, LOGGER_INFO, "%s", plist_xml);
-                            free(plist_xml);
+                            if (plist_xml) {
+                                logger_log(raop_rtp_mirror->logger, LOGGER_INFO, "%s", plist_xml);
+                                free(plist_xml);
+                            }
+                        }
+                        if (root_node) {
+                            plist_free(root_node);
                         }
                     }
                 }

@@ -68,6 +68,22 @@ typedef enum reset_type_e {
     RESET_TYPE_RTP_TO_HLS_TEARDOWN
 } reset_type_t;
 
+typedef struct raop_video_stats_s {
+    uint64_t rtt_ms;
+    uint64_t sent_fps;
+    uint64_t queued_frames;
+    uint64_t before_encoder_fps;
+    uint64_t submit_surface_fps;
+    uint64_t encoder_fps;
+    uint64_t encoder_drop_fps;
+    uint64_t encoder_queue_drop_fps;
+    uint64_t sink_overflow_drop_fps;
+    uint64_t idle_drop_fps;
+    double loss;
+    double tx_mbps;
+    double capacity_mbps;
+} raop_video_stats_t;
+
 struct raop_callbacks_s {
     void* cls;
 
@@ -96,6 +112,7 @@ struct raop_callbacks_s {
     void  (*audio_get_format)(void *cls, unsigned char *ct, unsigned short *spf, bool *usingScreen, bool *isMedia, uint64_t *audioFormat);
     void  (*video_report_size)(void *cls, float *width_source, float *height_source, float *width, float *height);
     void  (*mirror_video_running)(void *cls, bool is_running);
+    void  (*mirror_video_report)(void *cls, const raop_video_stats_t *stats);
     void  (*report_client_request) (void *cls, char *deviceid, char *model, char *name, bool *admit);
     void  (*display_pin) (void *cls, char * pin);
     void  (*register_client) (void *cls, const char *device_id, const char *pk_str, const char *name);
