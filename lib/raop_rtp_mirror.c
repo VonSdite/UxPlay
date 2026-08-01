@@ -173,6 +173,17 @@ raop_rtp_mirror_report_client_stats(raop_rtp_mirror_t *raop_rtp_mirror, plist_t 
     raop_rtp_mirror->callbacks.mirror_video_report(raop_rtp_mirror->callbacks.cls, &stats);
 }
 
+static bool
+reserve_buffer(unsigned char **buffer, size_t *capacity, size_t required)
+{
+    if (required <= *capacity) return true;
+    unsigned char *resized = realloc(*buffer, required);
+    if (!resized) return false;
+    *buffer = resized;
+    *capacity = required;
+    return true;
+}
+
 #define NO_FLUSH (-42)
 raop_rtp_mirror_t *raop_rtp_mirror_init(logger_t *logger, raop_callbacks_t *callbacks, raop_ntp_t *ntp,
                                         const char *remote, int remotelen, const unsigned char *aeskey)
@@ -227,8 +238,13 @@ raop_rtp_mirror_thread(void *arg)
     bool prepend_sps_pps = false;
     int sps_pps_len = 0;
     unsigned char* payload = NULL;
+    unsigned char* payload_buffer = NULL;
+    size_t payload_capacity = 0;
+    unsigned char* video_buffer = NULL;
+    size_t video_capacity = 0;
     unsigned int readstart = 0;
     bool conn_reset = false;
+    bool buffer_allocation_failed = false;
     uint64_t ntp_timestamp_nal = 0;
     uint64_t ntp_timestamp_raw = 0;
     uint64_t ntp_timestamp_remote = 0;
@@ -406,7 +422,14 @@ raop_rtp_mirror_thread(void *arg)
             /* "streaming report" packets have no timestamp in packet[8:15] */
 
             if (payload == NULL) {
-                payload = malloc(payload_size);
+                if (payload_size < 0 ||
+                    !reserve_buffer(&payload_buffer, &payload_capacity, payload_size > 0 ? (size_t) payload_size : 1)) {
+                    logger_log(raop_rtp_mirror->logger, LOGGER_ERR,
+                               "raop_rtp_mirror failed to reserve %d-byte payload buffer", payload_size);
+                    conn_reset = true;
+                    break;
+                }
+                payload = payload_buffer;
                 readstart = 0;
             }
 
@@ -475,19 +498,22 @@ raop_rtp_mirror_thread(void *arg)
                         prepend_sps_pps = false;
                 }
 		
+                size_t video_size = (size_t) payload_size + (prepend_sps_pps ? (size_t) sps_pps_len : 0);
+                if (!reserve_buffer(&video_buffer, &video_capacity, video_size > 0 ? video_size : 1)) {
+                    logger_log(raop_rtp_mirror->logger, LOGGER_ERR,
+                               "raop_rtp_mirror failed to reserve %zu-byte video buffer", video_size);
+                    conn_reset = true;
+                    buffer_allocation_failed = true;
+                    break;
+                }
+                payload_out = video_buffer;
                 if (prepend_sps_pps) {
                     assert(sps_pps);
-                    payload_out = (unsigned char*) malloc(payload_size + sps_pps_len);
-                    if (!payload_out) {
-                        printf("Memory allocation failed (payload_out)\n");
-                        exit(1);
-                    }
                     payload_decrypted = payload_out + sps_pps_len;
                     memcpy(payload_out, sps_pps, sps_pps_len);
                     free (sps_pps);
                     sps_pps = NULL;
                 } else {
-                    payload_out = (unsigned char*)  malloc(payload_size);
                     payload_decrypted = payload_out;
                 }
                 // Decrypt data: AES-CTR encryption/decryption  does not change the size of the data
@@ -599,7 +625,6 @@ raop_rtp_mirror_thread(void *arg)
                 }
 
                 raop_rtp_mirror->callbacks.video_process(raop_rtp_mirror->callbacks.cls, raop_rtp_mirror->ntp, &video_data);
-                free(payload_out);
                 break;
             case 0x01:
                 /* 128-byte observed packet header structure 
@@ -873,15 +898,17 @@ raop_rtp_mirror_thread(void *arg)
                 break;
             }
 
-            free(payload);
             payload = NULL;
             memset(packet, 0, 128);
             readstart = 0;
-            if (unsupported_codec) {
+            if (unsupported_codec || buffer_allocation_failed) {
                 break;
             }
         }
     }
+    free(sps_pps);
+    free(payload_buffer);
+    free(video_buffer);
     /* Close the stream file descriptor */
     if (stream_fd != -1) {
         CLOSESOCKET(stream_fd);
