@@ -23,7 +23,9 @@
 
 typedef struct {
     bool is_h265;
+    bool is_key_frame;
     int nal_count;
+    int codec_config_len;
     unsigned char *data;
     int data_len;
     uint64_t ntp_time_local;

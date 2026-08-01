@@ -496,6 +496,7 @@ raop_rtp_mirror_thread(void *arg)
                 // It seems the AirPlay protocol prepends NALs with their size, which we're replacing with the 4-byte
                 // start code for the NAL Byte-Stream Format.
                 bool valid_data = true;
+                bool is_key_frame = packet[5] == 0x10;
                 int nalu_size = 0;
                 int nalus_count = 0;
                 while (nalu_size < payload_size) {
@@ -514,10 +515,12 @@ raop_rtp_mirror_thread(void *arg)
                     }
                     int nalu_type = 0;
                     if (h265_video) {
-                        nalu_type = payload_decrypted[nalu_size] & 0x7e >> 1;;
+                        nalu_type = (payload_decrypted[nalu_size] & 0x7e) >> 1;
+                        if (nalu_type >= 16 && nalu_type <= 21) is_key_frame = true;
                         //logger_log(raop_rtp_mirror->logger, LOGGER_DEBUG," h265 video, NALU type %d, size %d", nalu_type, nc_len);
                     } else {
                         nalu_type = payload_decrypted[nalu_size] & 0x1f;
+                        if (nalu_type == 5) is_key_frame = true;
                         int ref_idc = (payload_decrypted[nalu_size] >> 5);
                         switch (nalu_type) {
                         case 14:  /* Prefix NALu , seen before all VCL Nalu's in AirMyPc */
@@ -579,9 +582,11 @@ raop_rtp_mirror_thread(void *arg)
                 payload_decrypted = NULL;
                 video_decode_struct video_data;
                 video_data.is_h265 = h265_video;
+                video_data.is_key_frame = is_key_frame;
                 video_data.ntp_time_local = ntp_timestamp_local;
                 video_data.ntp_time_remote = ntp_timestamp_remote;
                 video_data.nal_count = nalus_count;   /*nal_count will be the number of nal units in the packet */
+                video_data.codec_config_len = prepend_sps_pps ? sps_pps_len : 0;
                 video_data.data_len = payload_size;
                 video_data.data = payload_out;
                 if (prepend_sps_pps) {
