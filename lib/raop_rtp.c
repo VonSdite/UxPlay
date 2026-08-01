@@ -485,7 +485,10 @@ raop_rtp_thread_udp(void *arg)
                 if (resent_packetlen >= 12) {
                     logger_log(raop_rtp->logger, LOGGER_DEBUG, "raop_rtp resent audio packet: seqnum=%u", seqnum);
                     int result = raop_buffer_enqueue(raop_rtp->buffer, resent_packet, resent_packetlen, 1);
-                    assert(result >= 0);
+                    if (result < 0) {
+                        logger_log(raop_rtp->logger, LOGGER_ERR,
+                                   "raop_rtp failed to buffer resent audio packet: seqnum=%u", seqnum);
+                    }
                 } else if (logger_debug) {
                     /* type_c = 0x56 packets  with length 8 have been reported */
                     char *str = utils_data_to_string(packet, packetlen, 16);
@@ -612,7 +615,9 @@ raop_rtp_thread_udp(void *arg)
             if (raop_rtp->ct == 2 && packetlen == 44)  continue;   /* ignore the ALAC packets with format information only. */
 
             int result = raop_buffer_enqueue(raop_rtp->buffer, packet, packetlen, 1);
-            assert(result >= 0);
+            if (result < 0) {
+                logger_log(raop_rtp->logger, LOGGER_ERR, "raop_rtp failed to buffer audio packet");
+            }
 
             if (!raop_rtp->initial_sync) {
                 /* wait until the first sync before dequeing ALAC */
@@ -644,7 +649,6 @@ raop_rtp_thread_udp(void *arg)
                     }
 
                     raop_rtp->callbacks.audio_process(raop_rtp->callbacks.cls, raop_rtp->ntp, &audio_data);
-                    free(payload);
                 }
 
                 /* Handle possible resend requests */

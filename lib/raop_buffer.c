@@ -47,6 +47,7 @@ typedef struct {
 
     /* Payload data */
     unsigned int payload_size;
+    unsigned int payload_capacity;
     void *payload_data;
 } raop_buffer_entry_t;
 
@@ -83,6 +84,7 @@ raop_buffer_init(logger_t *logger,
         raop_buffer_entry_t *entry = &raop_buffer->entries[i];
         entry->payload_data = NULL;
         entry->payload_size = 0;
+        entry->payload_capacity = 0;
     }
 
     raop_buffer->is_empty = 1;
@@ -93,6 +95,10 @@ raop_buffer_init(logger_t *logger,
 void
 raop_buffer_destroy(raop_buffer_t *raop_buffer)
 {
+    if (!raop_buffer) {
+        return;
+    }
+
     for (int i = 0; i < RAOP_BUFFER_LENGTH; i++) {
         raop_buffer_entry_t *entry = &raop_buffer->entries[i];
         if (entry->payload_data != NULL) {
@@ -100,10 +106,8 @@ raop_buffer_destroy(raop_buffer_t *raop_buffer)
         }
     }
 
-    if (raop_buffer) {
-        aes_cbc_destroy(raop_buffer->aes_ctx);
-        free(raop_buffer);
-    }
+    aes_cbc_destroy(raop_buffer->aes_ctx);
+    free(raop_buffer);
 
 }
 
@@ -191,11 +195,6 @@ raop_buffer_enqueue(raop_buffer_t *raop_buffer, unsigned char *data, unsigned sh
         return 0;
     }
 
-    /* Check that there is always space in the buffer, otherwise flush */
-    if (seqnum_cmp(seqnum, raop_buffer->first_seqnum + RAOP_BUFFER_LENGTH) >= 0) {
-        raop_buffer_flush(raop_buffer, seqnum);
-    }
-
     /* Get entry corresponding our seqnum */
     raop_buffer_entry_t *entry = &raop_buffer->entries[seqnum % RAOP_BUFFER_LENGTH];
     if (entry->filled && seqnum_cmp(entry->seqnum, seqnum) == 0) {
@@ -203,15 +202,33 @@ raop_buffer_enqueue(raop_buffer_t *raop_buffer, unsigned char *data, unsigned sh
         return 0;
     }
 
-    /* Update the raop_buffer entry header */
+    if ((unsigned int) payload_size > entry->payload_capacity) {
+        void *payload_data = realloc(entry->payload_data, payload_size);
+        if (!payload_data) {
+            return -1;
+        }
+        entry->payload_data = payload_data;
+        entry->payload_capacity = payload_size;
+    }
+
+    /* Check that there is always space in the buffer, otherwise flush */
+    if (seqnum_cmp(seqnum, raop_buffer->first_seqnum + RAOP_BUFFER_LENGTH) >= 0) {
+        raop_buffer_flush(raop_buffer, seqnum);
+    }
+
+    unsigned int decrypted_size = 0;
+    int decrypt_ret = raop_buffer_decrypt(raop_buffer, data, entry->payload_data, payload_size, &decrypted_size);
+    assert(decrypt_ret >= 0);
+    assert((int) decrypted_size <= payload_size);
+    if (decrypt_ret < 0) {
+        return -1;
+    }
+
+    /* Publish the entry after its payload is ready. */
     entry->seqnum = seqnum;
     entry->rtp_timestamp = byteutils_get_int_be(data, 4);
+    entry->payload_size = decrypted_size;
     entry->filled = 1;
-
-    entry->payload_data = malloc(payload_size);
-    int decrypt_ret = raop_buffer_decrypt(raop_buffer, data, entry->payload_data, payload_size, &entry->payload_size);
-    assert(decrypt_ret >= 0);
-    assert((int) entry->payload_size <= payload_size);
 
     /* Update the raop_buffer seqnums */
     if (raop_buffer->is_empty) {
@@ -262,9 +279,7 @@ raop_buffer_dequeue(raop_buffer_t *raop_buffer, unsigned int *length, uint32_t *
     *seqnum = entry->seqnum;
     *length = entry->payload_size;
     entry->payload_size = 0;
-    void* data = entry->payload_data;
-    entry->payload_data = NULL;
-    return data;
+    return entry->payload_data;
 }
 
 void raop_buffer_handle_resends(raop_buffer_t *raop_buffer, raop_resend_cb_t resend_cb, void *opaque) {
@@ -292,11 +307,7 @@ void raop_buffer_flush(raop_buffer_t *raop_buffer, int next_seq) {
     assert(raop_buffer);
 
     for (int i = 0; i < RAOP_BUFFER_LENGTH; i++) {
-        if (raop_buffer->entries[i].payload_data) {
-            free(raop_buffer->entries[i].payload_data);
-            raop_buffer->entries[i].payload_data = NULL;   
-            raop_buffer->entries[i].payload_size = 0;
-        }
+        raop_buffer->entries[i].payload_size = 0;
         raop_buffer->entries[i].filled = 0;
     }
     if (next_seq < 0 || next_seq > 0xffff) {
