@@ -23,6 +23,7 @@
 
 #include "crypto.h"
 
+#include <openssl/aes.h>
 #include <openssl/evp.h>
 #include <openssl/err.h>
 #include <openssl/rand.h>
@@ -40,8 +41,11 @@
 struct aes_ctx_s {
     EVP_CIPHER_CTX *cipher_ctx;
     uint8_t iv[AES_128_BLOCK_SIZE];
+    uint8_t cbc_state_iv[AES_128_BLOCK_SIZE];
     aes_direction_t direction;
     uint8_t block_offset;
+    AES_KEY cbc_key;
+    bool cbc_key_initialized;
 };
 
 uint8_t waste[AES_128_BLOCK_SIZE];
@@ -155,20 +159,41 @@ void aes_ctr_destroy(aes_ctx_t *ctx) {
 // AES CBC
 
 aes_ctx_t *aes_cbc_init(const uint8_t *key, const uint8_t *iv, aes_direction_t direction) {
-    return aes_init(key, iv, EVP_aes_128_cbc(), direction);
+    aes_ctx_t *ctx = aes_init(key, iv, EVP_aes_128_cbc(), direction);
+    memcpy(ctx->cbc_state_iv, iv, AES_128_BLOCK_SIZE);
+    const int key_result = direction == AES_ENCRYPT
+        ? AES_set_encrypt_key(key, 128, &ctx->cbc_key)
+        : AES_set_decrypt_key(key, 128, &ctx->cbc_key);
+    if (key_result != 0) {
+        handle_error(__func__);
+    }
+    ctx->cbc_key_initialized = true;
+    return ctx;
 }
 
 void aes_cbc_encrypt(aes_ctx_t *ctx, const uint8_t *in, uint8_t *out, int len) {
     assert(ctx->direction == AES_ENCRYPT);
+    if (ctx->cbc_key_initialized && len > 0 && (len % AES_128_BLOCK_SIZE) == 0) {
+        AES_cbc_encrypt(in, out, (size_t) len, &ctx->cbc_key, ctx->cbc_state_iv, AES_ENCRYPT);
+        return;
+    }
     aes_encrypt(ctx, in, out, len);
 }
 
 void aes_cbc_decrypt(aes_ctx_t *ctx, const uint8_t *in, uint8_t *out, int len) {
     assert(ctx->direction == AES_DECRYPT);
+    if (ctx->cbc_key_initialized && len > 0 && (len % AES_128_BLOCK_SIZE) == 0) {
+        AES_cbc_encrypt(in, out, (size_t) len, &ctx->cbc_key, ctx->cbc_state_iv, AES_DECRYPT);
+        return;
+    }
     aes_decrypt(ctx, in, out, len);
 }
 
 void aes_cbc_reset(aes_ctx_t *ctx) {
+    if (ctx->cbc_key_initialized) {
+        memcpy(ctx->cbc_state_iv, ctx->iv, AES_128_BLOCK_SIZE);
+        return;
+    }
     aes_reset_iv(ctx);
 }
 

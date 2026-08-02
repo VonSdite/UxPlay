@@ -34,6 +34,7 @@
 #include "byteutils.h"
 
 #define RAOP_BUFFER_LENGTH 256
+#define RAOP_BUFFER_MIN_PAYLOAD_CAPACITY 1024U
 
 typedef struct {
     /* Data available */
@@ -115,6 +116,26 @@ static short
 seqnum_cmp(unsigned short s1, unsigned short s2)
 {
     return (s1 - s2);
+}
+
+static unsigned int
+raop_buffer_next_payload_capacity(unsigned int current_capacity, unsigned int payload_size)
+{
+    const unsigned int max_capacity = RAOP_PACKET_LEN - 12U;
+    unsigned int capacity = current_capacity;
+
+    if (capacity < RAOP_BUFFER_MIN_PAYLOAD_CAPACITY) {
+        capacity = RAOP_BUFFER_MIN_PAYLOAD_CAPACITY;
+    }
+    while (capacity < payload_size && capacity < max_capacity) {
+        const unsigned int next_capacity = capacity * 2U;
+        if (next_capacity <= capacity || next_capacity > max_capacity) {
+            capacity = max_capacity;
+            break;
+        }
+        capacity = next_capacity;
+    }
+    return capacity < payload_size ? payload_size : capacity;
 }
 
 int
@@ -202,12 +223,16 @@ raop_buffer_enqueue(raop_buffer_t *raop_buffer, unsigned char *data, unsigned sh
     }
 
     if ((unsigned int) payload_size > entry->payload_capacity) {
-        void *payload_data = realloc(entry->payload_data, payload_size);
+        const unsigned int new_capacity = raop_buffer_next_payload_capacity(
+            entry->payload_capacity,
+            (unsigned int) payload_size
+        );
+        void *payload_data = realloc(entry->payload_data, new_capacity);
         if (!payload_data) {
             return -1;
         }
         entry->payload_data = payload_data;
-        entry->payload_capacity = payload_size;
+        entry->payload_capacity = new_capacity;
     }
 
     /* Check that there is always space in the buffer, otherwise flush */
