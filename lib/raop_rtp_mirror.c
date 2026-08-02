@@ -54,6 +54,7 @@
 #define SECOND_IN_NSECS 1000000000UL
 #define SEC SECOND_IN_NSECS
 #define RUN_LOOP_TIMEOUT_US 50000
+#define MIRROR_BUFFER_MIN_CAPACITY 4096U
 
 /* for MacOS, where SOL_TCP and TCP_KEEPIDLE are not defined */
 #if !defined(SOL_TCP) && defined(IPPROTO_TCP)
@@ -178,10 +179,22 @@ static bool
 reserve_buffer(unsigned char **buffer, size_t *capacity, size_t required)
 {
     if (required <= *capacity) return true;
-    unsigned char *resized = realloc(*buffer, required);
+    size_t new_capacity = *capacity;
+    if (new_capacity < MIRROR_BUFFER_MIN_CAPACITY) {
+        new_capacity = MIRROR_BUFFER_MIN_CAPACITY;
+    }
+    while (new_capacity < required) {
+        const size_t growth = new_capacity / 2;
+        if (growth == 0 || new_capacity > (size_t)-1 - growth) {
+            new_capacity = required;
+            break;
+        }
+        new_capacity += growth;
+    }
+    unsigned char *resized = realloc(*buffer, new_capacity);
     if (!resized) return false;
     *buffer = resized;
-    *capacity = required;
+    *capacity = new_capacity;
     return true;
 }
 
