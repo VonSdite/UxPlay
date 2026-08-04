@@ -53,8 +53,10 @@
 
 #define SECOND_IN_NSECS 1000000000UL
 #define SEC SECOND_IN_NSECS
-#define RUN_LOOP_TIMEOUT_US 50000
+#define MIRROR_SELECT_TIMEOUT_US 5000
+#define MIRROR_RECV_TIMEOUT_US 5000
 #define MIRROR_BUFFER_MIN_CAPACITY 4096U
+#define MIRROR_MAX_PAYLOAD_SIZE (16U * 1024U * 1024U)
 
 /* for MacOS, where SOL_TCP and TCP_KEEPIDLE are not defined */
 #if !defined(SOL_TCP) && defined(IPPROTO_TCP)
@@ -219,6 +221,7 @@ raop_rtp_mirror_t *raop_rtp_mirror_init(logger_t *logger, raop_callbacks_t *call
         return NULL;
     }
     if (raop_rtp_mirror_parse_remote(raop_rtp_mirror, remote, remotelen) < 0) {
+        mirror_buffer_destroy(raop_rtp_mirror->buffer);
         free(raop_rtp_mirror);
         return NULL;
     }
@@ -249,6 +252,7 @@ raop_rtp_mirror_thread(void *arg)
     int stream_fd = -1;
     unsigned char packet[128] = {0};
     unsigned char* sps_pps = NULL;
+    size_t sps_pps_capacity = 0;
     bool prepend_sps_pps = false;
     int sps_pps_len = 0;
     unsigned char* payload = NULL;
@@ -285,9 +289,13 @@ raop_rtp_mirror_thread(void *arg)
         }
         MUTEX_UNLOCK(raop_rtp_mirror->run_mutex);
 
-        /* Socket readiness returns immediately; this timeout bounds control checks. */
+        /* Socket readiness returns immediately. Keep the idle budget for a
+         * clean packet boundary, but poll a fragmented header/payload with
+         * the short receive budget so a partial TCP read is not stretched by
+         * the idle timeout on the next loop. */
         tv.tv_sec = 0;
-        tv.tv_usec = RUN_LOOP_TIMEOUT_US;
+        tv.tv_usec = (payload != NULL || readstart != 0) ?
+            MIRROR_RECV_TIMEOUT_US : MIRROR_SELECT_TIMEOUT_US;
 
         /* Get the correct nfds value and set rfds */
         FD_ZERO(&rfds);
@@ -325,10 +333,31 @@ raop_rtp_mirror_thread(void *arg)
                 break;
             }
 
+            /* A data socket can be reused after a client drops a partial
+             * header. Start the replacement stream with no state from the
+             * previous TCP connection. The allocated payload/config buffers
+             * remain available for reuse. */
+            mirror_buffer_reset(raop_rtp_mirror->buffer);
+            payload = NULL;
+            readstart = 0;
+            prepend_sps_pps = false;
+            sps_pps_len = 0;
+            ntp_timestamp_nal = 0;
+            ntp_timestamp_raw = 0;
+            ntp_timestamp_remote = 0;
+            ntp_timestamp_local = 0;
+            codec = VIDEO_CODEC_UNKNOWN;
+            h265_video = false;
+            unsupported_codec = false;
+            video_stream_suspended = false;
+            first_packet = true;
+
             // We're calling recv for a certain amount of data, so we need a timeout
             struct timeval tv;
             tv.tv_sec = 0;
-            tv.tv_usec = RUN_LOOP_TIMEOUT_US;
+            /* A fragmented mirror access unit must not wait for the idle
+             * polling budget before the next recv attempt. */
+            tv.tv_usec = MIRROR_RECV_TIMEOUT_US;
             if (setsockopt(stream_fd, SOL_SOCKET, SO_RCVTIMEO, CAST &tv, sizeof(tv)) < 0) {
                 int sock_err = SOCKET_GET_ERROR();
                 logger_log(raop_rtp_mirror->logger, LOGGER_ERR,
@@ -341,6 +370,15 @@ raop_rtp_mirror_thread(void *arg)
                 int sock_err = SOCKET_GET_ERROR();
                 logger_log(raop_rtp_mirror->logger, LOGGER_WARNING,
                            "raop_rtp_mirror could not set stream socket keepalive %d %s", sock_err, SOCKET_ERROR_STRING(sock_err));
+            }
+            /* Mirror access units are latency-sensitive. Disable Nagle so a
+             * short header or tail is delivered without waiting for a later
+             * TCP segment; the 5 ms receive timeout remains the stop bound. */
+            option = 1;
+            if (setsockopt(stream_fd, SOL_TCP, TCP_NODELAY, CAST &option, sizeof(option)) < 0) {
+                int sock_err = SOCKET_GET_ERROR();
+                logger_log(raop_rtp_mirror->logger, LOGGER_WARNING,
+                           "raop_rtp_mirror could not set TCP_NODELAY %d %s", sock_err, SOCKET_ERROR_STRING(sock_err));
             }
             option = 60;
             if (setsockopt(stream_fd, SOL_TCP, TCP_KEEPIDLE, CAST &option, sizeof(option)) < 0) {
@@ -379,7 +417,7 @@ raop_rtp_mirror_thread(void *arg)
             if (payload == NULL && ret == 0) {
                 logger_log(raop_rtp_mirror->logger, LOGGER_DEBUG,
                            "raop_rtp_mirror tcp socket was closed by client (recv returned 0); got %d bytes of 128 byte header",readstart);
-                FD_CLR(stream_fd, &rfds);
+                CLOSESOCKET(stream_fd);
                 stream_fd = -1;
                 continue;
             } else if (payload == NULL && ret == -1) {
@@ -393,6 +431,12 @@ raop_rtp_mirror_thread(void *arg)
 
             /*packet[0:3] contains the payload size */
             int payload_size = byteutils_get_int(packet, 0);
+            if (payload_size < 0 || (size_t) payload_size > MIRROR_MAX_PAYLOAD_SIZE) {
+                logger_log(raop_rtp_mirror->logger, LOGGER_ERR,
+                           "raop_rtp_mirror rejected invalid payload size %d", payload_size);
+                conn_reset = true;
+                break;
+            }
             char packet_description[13] = {0};
             const bool known_packet_type = packet[4] == 0x00 || packet[4] == 0x01 ||
                 packet[4] == 0x02 || packet[4] == 0x05;
@@ -451,6 +495,7 @@ raop_rtp_mirror_thread(void *arg)
                 readstart = 0;
             }
 
+            ret = 1;
             while ((int) readstart < payload_size) {
                 // Payload data
                 unsigned char *pos = payload + readstart;
@@ -511,8 +556,9 @@ raop_rtp_mirror_thread(void *arg)
                         logger_log(raop_rtp_mirror->logger, LOGGER_DEBUG,
                                    "raop_rtp_mirror: prepended sps_pps timestamp does not match timestamp of "
                                    "video payload\n%llu\n%llu , discarding", ntp_timestamp_raw, ntp_timestamp_nal);
-                        free (sps_pps);
-                        sps_pps = NULL;
+                        /* Keep the allocated prefix for the next codec packet;
+                         * only the pending timestamp association is invalid. */
+                        sps_pps_len = 0;
                         prepend_sps_pps = false;
                 }
 		
@@ -529,8 +575,6 @@ raop_rtp_mirror_thread(void *arg)
                     assert(sps_pps);
                     payload_decrypted = payload_out + sps_pps_len;
                     memcpy(payload_out, sps_pps, sps_pps_len);
-                    free (sps_pps);
-                    sps_pps = NULL;
                 } else {
                     payload_decrypted = payload_out;
                 }
@@ -544,8 +588,12 @@ raop_rtp_mirror_thread(void *arg)
                 int nalu_size = 0;
                 int nalus_count = 0;
                 while (nalu_size < payload_size) {
+                    if (payload_size - nalu_size < 4) {
+                        valid_data = false;
+                        break;
+                    }
                     int nc_len = byteutils_get_int_be(payload_decrypted, nalu_size);
-                    if (nc_len < 0 || nalu_size + 4 > payload_size) {
+                    if (nc_len < 0 || nc_len > payload_size - nalu_size - 4) {
                         valid_data = false;
                         break;
                     }
@@ -553,7 +601,7 @@ raop_rtp_mirror_thread(void *arg)
                     nalu_size += 4;
                     nalus_count++;
                     /* first bit of h264 nalu MUST be 0 ("forbidden_zero_bit") */
-                    if (payload_decrypted[nalu_size] & 0x80) {
+                    if (nc_len == 0 || (payload_decrypted[nalu_size] & 0x80)) {
                         valid_data = false;
                         break;
                     }
@@ -707,10 +755,15 @@ raop_rtp_mirror_thread(void *arg)
                     unsupported_codec = true;
                     break;
                 }
-                if (sps_pps) {
-                    free(sps_pps);
-                    sps_pps = NULL;
+                if (payload_size < 8) {
+                    logger_log(raop_rtp_mirror->logger, LOGGER_ERR,
+                               "raop_rtp_mirror rejected short video codec packet: %d bytes", payload_size);
+                    conn_reset = true;
+                    break;
                 }
+                /* Codec packets are infrequent, but senders may repeat them
+                 * during a format change. Reuse the prefix allocation. */
+                sps_pps_len = 0;
                 /* test for a H265 VPS/SPS/PPS */
                 unsigned char hvc1[] = { 0x68, 0x76, 0x63, 0x31 };
 
@@ -735,15 +788,28 @@ raop_rtp_mirror_thread(void *arg)
                     unsigned char sps_start_code[] = { 0xa1, 0x00, 0x01, 0x00 };
                     unsigned char pps_start_code[] = { 0xa2, 0x00, 0x01, 0x00 };
 
+                    if (payload_size < 0x75 + 5) {
+                        logger_log(raop_rtp_mirror->logger, LOGGER_ERR,
+                                   "raop_rtp_mirror rejected short HEVC codec packet: %d bytes", payload_size);
+                        conn_reset = true;
+                        break;
+                    }
+                    unsigned char *payload_end = payload + payload_size;
                     unsigned char * ptr = payload + 0x75;
  
-                    if (memcmp(ptr, vps_start_code, 4)) {
+                    if ((size_t)(payload_end - ptr) < 5 || memcmp(ptr, vps_start_code, 4)) {
                         logger_log(raop_rtp_mirror->logger, LOGGER_ERR, "non-conforming HEVC VPS/SPS/PPS payload (VPS)");
+                        conn_reset = true;
                         raop_rtp_mirror->callbacks.video_pause(raop_rtp_mirror->callbacks.cls);
                         break;
                     }
-                    short vps_size = byteutils_get_short_be(ptr, 3);
+                    uint16_t vps_size = byteutils_get_short_be(ptr, 3);
                     ptr += 5;
+                    if ((size_t)(payload_end - ptr) < (size_t)vps_size + 5) {
+                        logger_log(raop_rtp_mirror->logger, LOGGER_ERR, "invalid HEVC VPS length %u", vps_size);
+                        conn_reset = true;
+                        break;
+                    }
                     unsigned char *vps = ptr;
                     if (logger_debug) {
                         char *str = utils_data_to_string(vps, vps_size, 16);
@@ -751,13 +817,19 @@ raop_rtp_mirror_thread(void *arg)
                         free(str);
                     }
                     ptr += vps_size;
-                    if (memcmp(ptr, sps_start_code, 4)) {
+                    if ((size_t)(payload_end - ptr) < 5 || memcmp(ptr, sps_start_code, 4)) {
                         logger_log(raop_rtp_mirror->logger, LOGGER_ERR, "non-conforming HEVC VPS/SPS/PPS payload (SPS)");
+                        conn_reset = true;
                         raop_rtp_mirror->callbacks.video_pause(raop_rtp_mirror->callbacks.cls);
                         break;
                     }
-                    short sps_size = byteutils_get_short_be(ptr, 3);
+                    uint16_t sps_size = byteutils_get_short_be(ptr, 3);
                     ptr += 5;
+                    if ((size_t)(payload_end - ptr) < (size_t)sps_size + 5) {
+                        logger_log(raop_rtp_mirror->logger, LOGGER_ERR, "invalid HEVC SPS length %u", sps_size);
+                        conn_reset = true;
+                        break;
+                    }
                     unsigned char *sps = ptr;
                     if (logger_debug) {
                         char *str = utils_data_to_string(sps, sps_size, 16);
@@ -765,13 +837,19 @@ raop_rtp_mirror_thread(void *arg)
                         free(str);
                     }
                     ptr += sps_size;
-                    if (memcmp(ptr, pps_start_code, 4)) {
+                    if ((size_t)(payload_end - ptr) < 5 || memcmp(ptr, pps_start_code, 4)) {
                        logger_log(raop_rtp_mirror->logger, LOGGER_ERR, "non-conforming HEVC VPS/SPS/PPS payload (PPS)");			
+                        conn_reset = true;
                         raop_rtp_mirror->callbacks.video_pause(raop_rtp_mirror->callbacks.cls);
                         break;
                     }
-                    short pps_size = byteutils_get_short_be(ptr, 3);
+                    uint16_t pps_size = byteutils_get_short_be(ptr, 3);
                     ptr += 5;
+                    if ((size_t)(payload_end - ptr) < (size_t)pps_size) {
+                        logger_log(raop_rtp_mirror->logger, LOGGER_ERR, "invalid HEVC PPS length %u", pps_size);
+                        conn_reset = true;
+                        break;
+                    }
                     unsigned char *pps = ptr;
                     if (logger_debug) {
                         char *str = utils_data_to_string(pps, pps_size, 16);
@@ -780,8 +858,14 @@ raop_rtp_mirror_thread(void *arg)
                     }
 
                     sps_pps_len = vps_size + sps_size + pps_size + 12;
-                    sps_pps = (unsigned char*) malloc(sps_pps_len);
-                    assert(sps_pps);
+                    if (!reserve_buffer(&sps_pps, &sps_pps_capacity, (size_t) sps_pps_len)) {
+                        logger_log(raop_rtp_mirror->logger, LOGGER_ERR,
+                                   "raop_rtp_mirror failed to reserve %d-byte HEVC codec config", sps_pps_len);
+                        conn_reset = true;
+                        buffer_allocation_failed = true;
+                        sps_pps_len = 0;
+                        break;
+                    }
                     ptr = sps_pps;
                     memcpy(ptr, nal_start_code, 4);
                     ptr += 4;
@@ -810,9 +894,25 @@ raop_rtp_mirror_thread(void *arg)
                         conn_reset = true;
                         break;
                     }
-                    short sps_size = byteutils_get_short_be(payload,6);
+                    if (payload_size < 11) {
+                        logger_log(raop_rtp_mirror->logger, LOGGER_ERR,
+                                   "raop_rtp_mirror rejected short H264 codec packet: %d bytes", payload_size);
+                        conn_reset = true;
+                        break;
+                    }
+                    uint16_t sps_size = byteutils_get_short_be(payload, 6);
+                    if ((size_t) sps_size > (size_t) payload_size - 11) {
+                        logger_log(raop_rtp_mirror->logger, LOGGER_ERR, "invalid H264 SPS length %u", sps_size);
+                        conn_reset = true;
+                        break;
+                    }
                     unsigned char *sequence_parameter_set = payload + 8;
-                    short pps_size = byteutils_get_short_be(payload, sps_size + 9);
+                    uint16_t pps_size = byteutils_get_short_be(payload, sps_size + 9);
+                    if ((size_t) pps_size > (size_t) payload_size - sps_size - 11) {
+                        logger_log(raop_rtp_mirror->logger, LOGGER_ERR, "invalid H264 PPS length %u", pps_size);
+                        conn_reset = true;
+                        break;
+                    }
                     unsigned char *picture_parameter_set = payload + sps_size + 11;
                     int data_size = 6;
                     if (logger_debug) {
@@ -841,8 +941,14 @@ raop_rtp_mirror_thread(void *arg)
 
                     // Copy the sps and pps into a buffer to prepend to the next NAL unit.
                     sps_pps_len = sps_size + pps_size + 8;
-                    sps_pps = (unsigned char*) malloc(sps_pps_len);
-                    assert(sps_pps);
+                    if (!reserve_buffer(&sps_pps, &sps_pps_capacity, (size_t) sps_pps_len)) {
+                        logger_log(raop_rtp_mirror->logger, LOGGER_ERR,
+                                   "raop_rtp_mirror failed to reserve %d-byte H264 codec config", sps_pps_len);
+                        conn_reset = true;
+                        buffer_allocation_failed = true;
+                        sps_pps_len = 0;
+                        break;
+                    }
                     memcpy(sps_pps, nal_start_code, 4);
                     memcpy(sps_pps + 4, sequence_parameter_set, sps_size);
                     memcpy(sps_pps + sps_size + 4, nal_start_code, 4); 
@@ -918,7 +1024,7 @@ raop_rtp_mirror_thread(void *arg)
 
             payload = NULL;
             readstart = 0;
-            if (unsupported_codec || buffer_allocation_failed) {
+            if (conn_reset || unsupported_codec || buffer_allocation_failed) {
                 break;
             }
         }

@@ -67,6 +67,15 @@ mirror_buffer_init_aes(mirror_buffer_t *mirror_buffer, const uint64_t *streamCon
     mirror_buffer->aes_ctx = aes_ctr_init(aeskey_video, aesiv_video);
 }
 
+void
+mirror_buffer_reset(mirror_buffer_t *mirror_buffer)
+{
+    if (!mirror_buffer) return;
+    if (mirror_buffer->aes_ctx) aes_ctr_reset(mirror_buffer->aes_ctx);
+    mirror_buffer->nextDecryptCount = 0;
+    memset(mirror_buffer->og, 0, sizeof(mirror_buffer->og));
+}
+
 mirror_buffer_t *
 mirror_buffer_init(logger_t *logger, const unsigned char *aeskey)
 {
@@ -82,21 +91,32 @@ mirror_buffer_init(logger_t *logger, const unsigned char *aeskey)
 }
 
 void mirror_buffer_decrypt(mirror_buffer_t *mirror_buffer, unsigned char* input, unsigned char* output, int inputLen) {
+    if (mirror_buffer == NULL || input == NULL || output == NULL || inputLen <= 0) return;
+
     // Start decrypting
-    if (mirror_buffer->nextDecryptCount > 0) {//mirror_buffer->nextDecryptCount = 10
-        for (int i = 0; i < mirror_buffer->nextDecryptCount; i++) {
-            output[i] = (input[i] ^ mirror_buffer->og[(16 - mirror_buffer->nextDecryptCount) + i]);
+    int carry_len = mirror_buffer->nextDecryptCount;
+    if (carry_len < 0 || carry_len >= AES_128_BLOCK_SIZE) carry_len = 0;
+    if (carry_len > inputLen) carry_len = inputLen;
+    if (carry_len > 0) {//mirror_buffer->nextDecryptCount = 10
+        const int carry_offset = 16 - mirror_buffer->nextDecryptCount;
+        for (int i = 0; i < carry_len; i++) {
+            output[i] = (input[i] ^ mirror_buffer->og[carry_offset + i]);
         }
+        mirror_buffer->nextDecryptCount -= carry_len;
+        if (carry_len >= inputLen) return;
     }
+
+    const int encrypted_offset = carry_len;
+    const int remaining_len = inputLen - encrypted_offset;
     // Handling encrypted bytes
-    int encryptlen = ((inputLen - mirror_buffer->nextDecryptCount) / 16) * 16;
+    int encryptlen = (remaining_len / 16) * 16;
     // Aes decryption
     aes_ctr_start_fresh_block(mirror_buffer->aes_ctx);
-    aes_ctr_decrypt(mirror_buffer->aes_ctx, input + mirror_buffer->nextDecryptCount,
-                    output + mirror_buffer->nextDecryptCount, encryptlen);
+    aes_ctr_decrypt(mirror_buffer->aes_ctx, input + encrypted_offset,
+                    output + encrypted_offset, encryptlen);
     // int outputlength = mirror_buffer->nextDecryptCount + encryptlen;
     // Processing remaining length
-    int restlen = (inputLen - mirror_buffer->nextDecryptCount) % 16;
+    int restlen = remaining_len % 16;
     int reststart = inputLen - restlen;
     mirror_buffer->nextDecryptCount = 0;
     if (restlen > 0) {
