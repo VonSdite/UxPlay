@@ -506,7 +506,16 @@ raop_rtp_mirror_thread(void *arg)
 
             if (ret == 0) {
                 logger_log(raop_rtp_mirror->logger, LOGGER_ERR, "raop_rtp_mirror tcp socket was closed by client (recv returned 0)");
-                break;
+                /* A client may close cleanly in the middle of a payload and
+                 * immediately open a replacement mirror connection. Keep the
+                 * mirror listener alive just as the partial-header path does;
+                 * the next accept resets the stream/AES state before reading
+                 * the replacement. */
+                CLOSESOCKET(stream_fd);
+                stream_fd = -1;
+                payload = NULL;
+                readstart = 0;
+                continue;
             } else if (ret == -1) {
                 int sock_err = SOCKET_GET_ERROR();
                 if (sock_err == SOCKET_ERRORNAME(EAGAIN) || sock_err == SOCKET_ERRORNAME(EWOULDBLOCK)) continue; // Timeouts can happen even if the connection is fine
