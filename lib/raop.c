@@ -274,6 +274,19 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response) {
                 utils_ipaddress_to_string(conn->remotelen, conn->remote, conn->zone_id, ipaddr, (int) (sizeof(ipaddr)));
                 if (httpd_nohold(raop->httpd)) {
                     logger_log(raop->logger, LOGGER_INFO, "*****\"nohold\" feature: switch to new connection request from %s", ipaddr);		  
+                    raop_conn_t *active_conn = (raop_conn_t *) httpd_get_connection_by_type(
+                        raop->httpd, CONNECTION_TYPE_RAOP, 1);
+                    if (active_conn) {
+                        /* Finish the old media callbacks before admitting the
+                         * replacement session. The new session starts with an
+                         * independent media-callback lifetime. */
+                        if (active_conn->raop_rtp_mirror) {
+                            raop_rtp_mirror_stop(active_conn->raop_rtp_mirror);
+                        }
+                        if (active_conn->raop_rtp) {
+                            raop_rtp_stop(active_conn->raop_rtp);
+                        }
+                    }
                     httpd_remove_known_connections(raop->httpd);
                     if (raop->callbacks.video_reset) {
                         raop->callbacks.video_reset(raop->callbacks.cls, RESET_TYPE_NOHOLD);
@@ -563,10 +576,6 @@ conn_destroy(void *ptr) {
     }
     if (conn->raop_ntp) {
         raop_ntp_destroy(conn->raop_ntp);
-    }
-
-    if (raop->callbacks.video_flush) {
-        raop->callbacks.video_flush(raop->callbacks.cls);
     }
 
     free(conn->local);

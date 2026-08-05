@@ -53,7 +53,7 @@
 
 #define SECOND_IN_NSECS 1000000000UL
 #define SEC SECOND_IN_NSECS
-#define MIRROR_SELECT_TIMEOUT_US 5000
+#define MIRROR_SELECT_TIMEOUT_US 50000
 #define MIRROR_RECV_TIMEOUT_US 5000
 #define MIRROR_BUFFER_MIN_CAPACITY 4096U
 #define MIRROR_MAX_PAYLOAD_SIZE (16U * 1024U * 1024U)
@@ -248,6 +248,9 @@ raop_rtp_mirror_thread(void *arg)
 {
     raop_rtp_mirror_t *raop_rtp_mirror = arg;
     assert(raop_rtp_mirror);
+    if (raop_rtp_mirror->callbacks.mirror_video_running) {
+        raop_rtp_mirror->callbacks.mirror_video_running(raop_rtp_mirror->callbacks.cls, true);
+    }
 
     int stream_fd = -1;
     unsigned char packet[128] = {0};
@@ -370,15 +373,6 @@ raop_rtp_mirror_thread(void *arg)
                 int sock_err = SOCKET_GET_ERROR();
                 logger_log(raop_rtp_mirror->logger, LOGGER_WARNING,
                            "raop_rtp_mirror could not set stream socket keepalive %d %s", sock_err, SOCKET_ERROR_STRING(sock_err));
-            }
-            /* Mirror access units are latency-sensitive. Disable Nagle so a
-             * short header or tail is delivered without waiting for a later
-             * TCP segment; the 5 ms receive timeout remains the stop bound. */
-            option = 1;
-            if (setsockopt(stream_fd, SOL_TCP, TCP_NODELAY, CAST &option, sizeof(option)) < 0) {
-                int sock_err = SOCKET_GET_ERROR();
-                logger_log(raop_rtp_mirror->logger, LOGGER_WARNING,
-                           "raop_rtp_mirror could not set TCP_NODELAY %d %s", sock_err, SOCKET_ERROR_STRING(sock_err));
             }
             option = 60;
             if (setsockopt(stream_fd, SOL_TCP, TCP_KEEPIDLE, CAST &option, sizeof(option)) < 0) {
@@ -1131,9 +1125,6 @@ raop_rtp_mirror_start(raop_rtp_mirror_t *raop_rtp_mirror, unsigned short *mirror
     /* Create the thread and initialize running values */
     raop_rtp_mirror->running = 1;
     raop_rtp_mirror->joined = 0;
-    if (raop_rtp_mirror->callbacks.mirror_video_running) {
-        raop_rtp_mirror->callbacks.mirror_video_running(raop_rtp_mirror->callbacks.cls, true);
-    }
 
     THREAD_CREATE(raop_rtp_mirror->thread_mirror, raop_rtp_mirror_thread, raop_rtp_mirror);
     MUTEX_UNLOCK(raop_rtp_mirror->run_mutex);

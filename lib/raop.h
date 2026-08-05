@@ -110,6 +110,7 @@ struct raop_callbacks_s {
     void  (*audio_remote_control_id)(void *cls, const char *dacp_id, const char *active_remote_header);
     void  (*audio_set_progress)(void *cls, uint32_t *start, uint32_t *curr, uint32_t *end);
     void  (*audio_get_format)(void *cls, unsigned char *ct, unsigned short *spf, bool *usingScreen, bool *isMedia, uint64_t *audioFormat);
+    void  (*audio_stream_running)(void *cls, bool is_running);
     void  (*video_report_size)(void *cls, float *width_source, float *height_source, float *width, float *height);
     void  (*mirror_video_running)(void *cls, bool is_running);
     void  (*mirror_video_report)(void *cls, const raop_video_stats_t *stats);

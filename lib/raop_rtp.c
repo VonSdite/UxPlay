@@ -406,6 +406,9 @@ raop_rtp_thread_udp(void *arg)
     unsigned char no_data_marker[] = {0x00, 0x68, 0x34, 0x00 };
 
     assert(raop_rtp);
+    if (raop_rtp->callbacks.audio_stream_running) {
+        raop_rtp->callbacks.audio_stream_running(raop_rtp->callbacks.cls, true);
+    }
     bool logger_debug = (logger_get_level(raop_rtp->logger) >= LOGGER_DEBUG);
     bool logger_debug_data = (logger_get_level(raop_rtp->logger) >= LOGGER_DEBUG_DATA);
     raop_rtp->ntp_start_time = raop_ntp_get_local_time();
@@ -664,6 +667,9 @@ raop_rtp_thread_udp(void *arg)
     MUTEX_LOCK(raop_rtp->run_mutex);
     raop_rtp->running = false;
     MUTEX_UNLOCK(raop_rtp->run_mutex);
+    if (raop_rtp->callbacks.audio_stream_running) {
+        raop_rtp->callbacks.audio_stream_running(raop_rtp->callbacks.cls, false);
+    }
 
     logger_log(raop_rtp->logger, LOGGER_DEBUG, "raop_rtp exiting thread");
 
