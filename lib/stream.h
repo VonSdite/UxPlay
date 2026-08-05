@@ -30,6 +30,11 @@ typedef struct {
     int data_len;
     uint64_t ntp_time_local;
     uint64_t ntp_time_remote;
+    uint64_t receive_started_ns;
+    uint64_t header_received_ns;
+    uint64_t payload_received_ns;
+    uint64_t processed_ns;
+    int64_t source_timestamp_delta_ns;
 } video_decode_struct;
 
 typedef struct {

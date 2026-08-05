@@ -23,6 +23,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <stdbool.h>
+#include <time.h>
 #ifdef _WIN32
 #include <winsock2.h>
 #else
@@ -57,6 +58,15 @@
 #define MIRROR_RECV_TIMEOUT_US 5000
 #define MIRROR_BUFFER_MIN_CAPACITY 4096U
 #define MIRROR_MAX_PAYLOAD_SIZE (16U * 1024U * 1024U)
+
+#ifdef SMOOTHCAST_PIPELINE_TRACE
+static uint64_t mirror_monotonic_time_ns(void)
+{
+    struct timespec timestamp = {0};
+    if (clock_gettime(CLOCK_MONOTONIC, &timestamp) != 0) return 0;
+    return (uint64_t) timestamp.tv_sec * SECOND_IN_NSECS + (uint64_t) timestamp.tv_nsec;
+}
+#endif
 
 /* for MacOS, where SOL_TCP and TCP_KEEPIDLE are not defined */
 #if !defined(SOL_TCP) && defined(IPPROTO_TCP)
@@ -280,6 +290,11 @@ raop_rtp_mirror_thread(void *arg)
     bool unsupported_codec = false;
     bool video_stream_suspended = false;
     bool first_packet = true;
+#ifdef SMOOTHCAST_PIPELINE_TRACE
+    uint64_t receive_started_ns = 0;
+    uint64_t header_received_ns = 0;
+    uint64_t payload_received_ns = 0;
+#endif
     
     while (1) {
         fd_set rfds;
@@ -354,6 +369,11 @@ raop_rtp_mirror_thread(void *arg)
             unsupported_codec = false;
             video_stream_suspended = false;
             first_packet = true;
+#ifdef SMOOTHCAST_PIPELINE_TRACE
+            receive_started_ns = 0;
+            header_received_ns = 0;
+            payload_received_ns = 0;
+#endif
 
             // We're calling recv for a certain amount of data, so we need a timeout
             struct timeval tv;
@@ -402,6 +422,11 @@ raop_rtp_mirror_thread(void *arg)
 
             // The first 128 bytes are some kind of header for the payload that follows
             while (payload == NULL && readstart < 128) {
+#ifdef SMOOTHCAST_PIPELINE_TRACE
+                if (readstart == 0 && receive_started_ns == 0) {
+                    receive_started_ns = mirror_monotonic_time_ns();
+                }
+#endif
                 unsigned char* pos  = packet + readstart;
                 ret = recv(stream_fd, CAST pos, 128 - readstart, 0);
                 if (ret <= 0) break;
@@ -422,6 +447,11 @@ raop_rtp_mirror_thread(void *arg)
                 if (sock_err == SOCKET_ERRORNAME(ECONNRESET)) conn_reset = true;; 
                 break;
             }
+#ifdef SMOOTHCAST_PIPELINE_TRACE
+            if (payload == NULL && readstart == 128 && header_received_ns == 0) {
+                header_received_ns = mirror_monotonic_time_ns();
+            }
+#endif
 
             /*packet[0:3] contains the payload size */
             int payload_size = byteutils_get_int(packet, 0);
@@ -497,6 +527,11 @@ raop_rtp_mirror_thread(void *arg)
                 if (ret <= 0) break;
                 readstart = readstart + ret;
             }
+#ifdef SMOOTHCAST_PIPELINE_TRACE
+            if ((int) readstart == payload_size && payload_received_ns == 0) {
+                payload_received_ns = mirror_monotonic_time_ns();
+            }
+#endif
 
             if (ret == 0) {
                 logger_log(raop_rtp_mirror->logger, LOGGER_ERR, "raop_rtp_mirror tcp socket was closed by client (recv returned 0)");
@@ -680,6 +715,21 @@ raop_rtp_mirror_thread(void *arg)
                 video_data.is_key_frame = is_key_frame;
                 video_data.ntp_time_local = ntp_timestamp_local;
                 video_data.ntp_time_remote = ntp_timestamp_remote;
+#ifdef SMOOTHCAST_PIPELINE_TRACE
+                video_data.receive_started_ns = receive_started_ns;
+                video_data.header_received_ns = header_received_ns;
+                video_data.payload_received_ns = payload_received_ns;
+                video_data.processed_ns = mirror_monotonic_time_ns();
+                video_data.source_timestamp_delta_ns = ntp_timestamp_local > 0
+                    ? (int64_t) raop_ntp_get_local_time() - (int64_t) ntp_timestamp_local
+                    : 0;
+#else
+                video_data.receive_started_ns = 0;
+                video_data.header_received_ns = 0;
+                video_data.payload_received_ns = 0;
+                video_data.processed_ns = 0;
+                video_data.source_timestamp_delta_ns = 0;
+#endif
                 video_data.nal_count = nalus_count;   /*nal_count will be the number of nal units in the packet */
                 video_data.codec_config_len = prepend_sps_pps ? sps_pps_len : 0;
                 video_data.data_len = payload_size;
@@ -1027,6 +1077,11 @@ raop_rtp_mirror_thread(void *arg)
 
             payload = NULL;
             readstart = 0;
+#ifdef SMOOTHCAST_PIPELINE_TRACE
+            receive_started_ns = 0;
+            header_received_ns = 0;
+            payload_received_ns = 0;
+#endif
             if (conn_reset || unsupported_codec || buffer_allocation_failed) {
                 break;
             }
