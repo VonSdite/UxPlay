@@ -333,6 +333,8 @@ raop_rtp_process_events(raop_rtp_t *raop_rtp, void *cb_data)
 
     /* Handle flush if requested */
     if (flush != NO_FLUSH) {
+        /* A seek may restart RTP at an earlier sequence; anchor on the first new packet. */
+        raop_buffer_flush(raop_rtp->buffer, -1);
         if (raop_rtp->callbacks.audio_flush) {
             raop_rtp->callbacks.audio_flush(raop_rtp->callbacks.cls);
         }
@@ -414,7 +416,8 @@ raop_rtp_thread_udp(void *arg)
     raop_rtp->ntp_start_time = raop_ntp_get_local_time();
     raop_rtp->rtp_clock_started = false;
 
-    int no_resend = (raop_rtp->control_rport == 0); /* true when control_rport is not set */
+    /* AAC-ELD is sent redundantly; a missing sequence must not stall mirror audio. */
+    int no_resend = (raop_rtp->control_rport == 0 || raop_rtp->ct == 8);
 
     logger_log(raop_rtp->logger, LOGGER_DEBUG, "raop_rtp start_time = %8.6f (raop_rtp audio)",
                ((double) raop_rtp->ntp_start_time) / SEC);
